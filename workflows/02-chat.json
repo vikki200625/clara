@@ -1,0 +1,439 @@
+{
+  "name": "Clara \u2014 Chat",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clara-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000001",
+      "name": "Chat Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "clara-chat"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst message = (body.message || '').trim();\nconst sessionId = body.session_id || null;\n\nif (!message) {\n  return [{ json: { error: true, reply: 'You didn\\'t say anything.' } }];\n}\n\nreturn [{ json: { message, session_id: sessionId, error: false } }];"
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000002",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "err",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000003",
+      "name": "Has Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ reply: $json.error === true ? $json.reply : '', session_id: '' }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000004",
+      "name": "Return Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        850,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst message = input.message;\nlet sessionId = input.session_id;\nlet isNew = false;\n\nif (!sessionId) {\n  sessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);\n  isNew = true;\n}\n\n// Build Turso request body\nconst requests = [];\n\nif (isNew) {\n  requests.push({\n    type: 'execute',\n    stmt: {\n      sql: 'INSERT INTO sessions (session_id) VALUES (?)',\n      args: [{ type: 'text', value: sessionId }]\n    }\n  });\n}\n\nrequests.push({\n  type: 'execute',\n  stmt: {\n    sql: 'INSERT INTO messages (session_id, role, content) VALUES (?, \\'user\\', ?)',\n    args: [\n      { type: 'text', value: sessionId },\n      { type: 'text', value: message }\n    ]\n  }\n});\n\nrequests.push({\n  type: 'execute',\n  stmt: {\n    sql: 'SELECT role, content, emotion_self, emotion_user, created_at FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 20',\n    args: [{ type: 'text', value: sessionId }]\n  }\n});\n\nrequests.push({\n  type: 'execute',\n  stmt: {\n    sql: 'SELECT fact, category, strength FROM facts WHERE confidence >= 0.7 ORDER BY strength DESC LIMIT 15'\n  }\n});\n\nrequests.push({\n  type: 'execute',\n  stmt: {\n    sql: 'SELECT emotion, intensity, created_at FROM mood_log WHERE session_id = ? ORDER BY created_at DESC LIMIT 10',\n    args: [{ type: 'text', value: sessionId }]\n  }\n});\n\nrequests.push({\n  type: 'execute',\n  stmt: {\n    sql: 'SELECT content FROM prompts WHERE key = \\'soul\\' LIMIT 1'\n  }\n});\n\nreturn [{ json: { requestBody: { requests }, sessionId, message } }];"
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000006",
+      "name": "Build DB Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        850,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000007",
+      "name": "DB \u2014 Fetch Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1070,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const dbResult = $input.first().json;\nconst prevData = $('Build DB Request').first().json;\n\nconst results = dbResult.results || [];\nconst parseRows = (result) => {\n  if (!result || !result.response || !result.response.result) return [];\n  const cols = result.response.result.columns || result.response.result.cols || [];\n  const rows = result.response.result.rows || [];\n  return rows.map(row => {\n    const obj = {};\n    cols.forEach((col, i) => {\n      const cell = row[i];\n      obj[col.name] = (cell && typeof cell === 'object' && 'value' in cell) ? cell.value : cell;\n    });\n    return obj;\n  });\n};\n\n// results[0] = session create (or skip)\n// results[1] = insert user message\n// results[2] = recent messages\n// results[3] = facts\n// results[4] = mood_log\n// results[5] = soul prompt\nconst messages = parseRows(results[2]).reverse();\nconst facts = parseRows(results[3]);\nconst moodEntries = parseRows(results[4]);\nconst soulRow = parseRows(results[5])[0] || {};\n\nconst soulPrompt = soulRow.content || 'You are Clara.';\nconst factsStr = facts.map(f => '- [' + f.category + '] ' + f.fact).join('\\n');\nconst historyStr = messages.map(m => (m.role === 'user' ? 'Him' : 'Clara') + ': ' + m.content).join('\\n');\n\n// Build mood summary\nlet moodStr = '';\nif (moodEntries.length > 0) {\n  const recent = moodEntries.slice(0, 5);\n  const userMoods = recent.map(m => m.emotion).filter(Boolean);\n  const dominant = userMoods.length > 0 ? userMoods[0] : null;\n  const avgIntensity = recent.reduce((sum, m) => sum + (parseFloat(m.intensity) || 0.5), 0) / recent.length;\n  moodStr = 'Recent mood: ' + (dominant || 'unknown') + ' (intensity: ' + avgIntensity.toFixed(1) + ')';\n}\n\nconst assembledMessages = [\n  { role: 'system', content: soulPrompt },\n  { role: 'system', content: 'Things you know about him:\\n' + (factsStr || 'Nothing yet \\u2014 this might be new.') },\n  { role: 'system', content: 'Previous conversation:\\n' + (historyStr || 'This is the start of your conversation.') },\n  ...(moodStr ? [{ role: 'system', content: moodStr }] : []),\n  { role: 'user', content: prevData.message }\n];\n\nreturn [{ json: { assembledMessages, sessionId: prevData.sessionId, userMessage: prevData.message } }];"
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000008",
+      "name": "Assemble Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1290,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'laguna-s-2.1-free', messages: $json.assembledMessages, temperature: 0.85, max_tokens: 1000 }) }}",
+        "options": {
+          "retry": {
+            "enabled": true,
+            "numberOfRetries": 3,
+            "waitBetweenRetries": 2000
+          }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-opencode-client",
+              "value": "cli"
+            },
+            {
+              "name": "x-opencode-session",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-project",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-request",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "User-Agent",
+              "value": "opencode/latest/1.3.15/cli"
+            }
+          ]
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000009",
+      "name": "LLM \u2014 Clara Responds",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1510,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ngYc5oF80W9ovITM",
+          "name": "Clara \u2014 OpenCode Zen"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const llmResponse = $input.first().json;\nconst reply = (llmResponse.choices && llmResponse.choices[0] && llmResponse.choices[0].message && llmResponse.choices[0].message.content) || 'idk what to say rn';\nconst prevData = $('Assemble Prompt').first().json;\n\nreturn [{ json: { reply, sessionId: prevData.sessionId, userMessage: prevData.userMessage } }];"
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000010",
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1730,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nconst requests = [\n  {\n    type: 'execute',\n    stmt: {\n      sql: 'INSERT INTO messages (session_id, role, content) VALUES (?, \\'assistant\\', ?)',\n      args: [\n        { type: 'text', value: input.sessionId },\n        { type: 'text', value: input.reply }\n      ]\n    }\n  },\n  {\n    type: 'execute',\n    stmt: {\n      sql: \"UPDATE sessions SET last_active = datetime('now'), message_count = message_count + 2 WHERE session_id = ?\",\n      args: [{ type: 'text', value: input.sessionId }]\n    }\n  },\n  {\n    type: 'execute',\n    stmt: {\n      sql: \"UPDATE facts SET last_referenced = datetime('now')\"\n    }\n  }\n];\n\nreturn [{ json: { requestBody: { requests }, reply: input.reply, sessionId: input.sessionId, userMessage: input.userMessage } }];"
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000011",
+      "name": "Build Save Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1950,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000012",
+      "name": "DB \u2014 Save Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2170,
+        400
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/clara-extractor",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ user_message: $('Parse Response').first().json.userMessage, assistant_message: $('Parse Response').first().json.reply, session_id: $('Parse Response').first().json.sessionId }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000013",
+      "name": "Fire Extractor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2390,
+        350
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/clara-emotion-tracker",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ user_message: $('Parse Response').first().json.userMessage, assistant_message: $('Parse Response').first().json.reply, session_id: $('Parse Response').first().json.sessionId }) }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000014",
+      "name": "Fire Emotion Tracker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2390,
+        480
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ reply: $('Parse Response').first().json.reply, session_id: $('Parse Response').first().json.sessionId }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "e1f2a3b4-0002-4000-8000-000000000015",
+      "name": "Return Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2610,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Chat Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Has Error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Error?": {
+      "main": [
+        [
+          {
+            "node": "Return Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build DB Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build DB Request": {
+      "main": [
+        [
+          {
+            "node": "DB \u2014 Fetch Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB \u2014 Fetch Context": {
+      "main": [
+        [
+          {
+            "node": "Assemble Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM \u2014 Clara Responds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM \u2014 Clara Responds": {
+      "main": [
+        [
+          {
+            "node": "Parse Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Response": {
+      "main": [
+        [
+          {
+            "node": "Build Save Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Save Request": {
+      "main": [
+        [
+          {
+            "node": "DB \u2014 Save Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB \u2014 Save Reply": {
+      "main": [
+        [
+          {
+            "node": "Fire Extractor",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fire Emotion Tracker",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

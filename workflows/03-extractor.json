@@ -1,0 +1,245 @@
+{
+  "name": "Clara \u2014 Extractor",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clara-extractor",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000001",
+      "name": "Receive Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "clara-extractor"
+    },
+    {
+      "parameters": {
+        "jsCode": "const trigger = $input.first().json.body || $input.first().json;\nconst userMsg = trigger.user_message || '';\nconst assistantMsg = trigger.assistant_message || '';\nconst sessionId = trigger.session_id || '';\n\nconst requestBody = {\n  requests: [\n    {\n      type: 'execute',\n      stmt: {\n        sql: \"SELECT content FROM prompts WHERE key = 'extractor' LIMIT 1\"\n      }\n    },\n    {\n      type: 'execute',\n      stmt: {\n        sql: 'SELECT id, fact, category, strength FROM facts ORDER BY strength DESC LIMIT 50'\n      }\n    }\n  ]\n};\n\nreturn [{ json: { requestBody, userMsg, assistantMsg, sessionId } }];"
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000010",
+      "name": "Build DB Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000002",
+      "name": "Load Extractor Prompt + Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        690,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const dbResult = $input.first().json;\nconst prevData = $('Build DB Request').first().json;\n\nconst results = dbResult.results || [];\nconst parseRows = (result) => {\n  if (!result || !result.response || !result.response.result) return [];\n  const cols = result.response.result.columns || result.response.result.cols || [];\n  const rows = result.response.result.rows || [];\n  return rows.map(row => {\n    const obj = {};\n    cols.forEach((col, i) => {\n      const cell = row[i];\n      obj[col.name] = (cell && typeof cell === 'object' && 'value' in cell) ? cell.value : cell;\n    });\n    return obj;\n  });\n};\n\nconst extractorPrompt = parseRows(results[0])[0]?.content || '';\nconst existingFacts = parseRows(results[1]);\n\nconst factsList = existingFacts.map(f => `[${f.id}] ${f.fact} (${f.category}, strength: ${f.strength})`).join('\\n');\n\nconst messages = [\n  { role: 'system', content: extractorPrompt },\n  { role: 'user', content: 'EXISTING FACTS:\\n' + (factsList || 'None yet.') + '\\n\\nCONVERSATION TO ANALYZE:\\nUser: ' + prevData.userMsg + '\\nClara: ' + prevData.assistantMsg + '\\n\\nExtract facts about the USER (not Clara). Return JSON only.' }\n];\n\nreturn [{ json: { messages, sessionId: prevData.sessionId, userMsg: prevData.userMsg, assistantMsg: prevData.assistantMsg } }];"
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000003",
+      "name": "Build Extraction Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        910,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'laguna-s-2.1-free', messages: $json.messages, temperature: 0.3, max_tokens: 8000 }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-opencode-client",
+              "value": "cli"
+            },
+            {
+              "name": "x-opencode-session",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-project",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-request",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "User-Agent",
+              "value": "opencode/latest/1.3.15/cli"
+            }
+          ]
+        },
+        "options": {
+          "retry": {
+            "enabled": true,
+            "numberOfRetries": 3,
+            "waitBetweenRetries": 2000
+          }
+        }
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000004",
+      "name": "LLM \u2014 Extract Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1130,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ngYc5oF80W9ovITM",
+          "name": "Clara \u2014 OpenCode Zen"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const llmResponse = $input.first().json;\nconst content = (llmResponse.choices && llmResponse.choices[0] && llmResponse.choices[0].message && llmResponse.choices[0].message.content) || '';\nconst prevData = $('Build Extraction Prompt').first().json;\nconst sessionId = prevData.sessionId;\n\nlet raw;\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  raw = JSON.parse(jsonMatch ? jsonMatch[0] : content);\n} catch (e) {\n  raw = { facts: [] };\n}\n\n// Handle multiple formats\nlet factsToSave = [];\n\n// Format 1: { extract: true, facts: [{ fact: '...', category: '...', confidence: 0.8 }] }\nif (raw.extract && Array.isArray(raw.facts)) {\n  factsToSave = raw.facts;\n}\n// Format 2: { facts: ['string1', 'string2'] }\nelse if (Array.isArray(raw.facts)) {\n  factsToSave = raw.facts.map(f => {\n    if (typeof f === 'string') return { fact: f, category: 'general', confidence: 0.7 };\n    return f;\n  });\n}\n// Format 3: { extracted_facts: [...] }\nelse if (raw.extracted_facts && Array.isArray(raw.extracted_facts)) {\n  factsToSave = raw.extracted_facts.map(f => {\n    if (typeof f === 'string') return { fact: f, category: 'general', confidence: 0.7 };\n    return f;\n  });\n}\n\nconst requests = factsToSave.map(f => ({\n  type: 'execute',\n  stmt: {\n    sql: 'INSERT INTO facts (fact, category, confidence, source_session) VALUES (?, ?, ?, ?)',\n    args: [\n      { type: 'text', value: f.fact || f.text || f.description || '' },\n      { type: 'text', value: f.category || 'general' },\n      { type: 'float', value: f.confidence || 0.7 },\n      { type: 'text', value: sessionId }\n    ]\n  }\n}));\n\nreturn [{ json: { requestBody: { requests }, sessionId } }];"
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000005",
+      "name": "Parse Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1350,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "b1c2d3e4-0003-4000-8000-000000000006",
+      "name": "Save Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1570,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Receive Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build DB Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build DB Request": {
+      "main": [
+        [
+          {
+            "node": "Load Extractor Prompt + Facts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Extractor Prompt + Facts": {
+      "main": [
+        [
+          {
+            "node": "Build Extraction Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Extraction Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM \u2014 Extract Facts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM \u2014 Extract Facts": {
+      "main": [
+        [
+          {
+            "node": "Parse Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Extraction": {
+      "main": [
+        [
+          {
+            "node": "Save Facts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

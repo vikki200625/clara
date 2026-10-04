@@ -1,0 +1,408 @@
+{
+  "name": "Clara \u2014 Cleanup Manager",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000001",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const requestBody = {\n  requests: [\n    {\n      type: 'execute',\n      stmt: {\n        sql: \"SELECT content FROM prompts WHERE key = 'fact_manager' LIMIT 1\"\n      }\n    },\n    {\n      type: 'execute',\n      stmt: {\n        sql: 'SELECT id, fact, category, strength, confidence FROM facts ORDER BY strength DESC LIMIT 100'\n      }\n    },\n    {\n      type: 'execute',\n      stmt: {\n        sql: \"SELECT session_id, status, last_active FROM sessions WHERE status = 'active'\"\n      }\n    },\n    {\n      type: 'execute',\n      stmt: {\n        sql: \"DELETE FROM mood_log WHERE created_at < datetime('now', '-30 days')\"\n      }\n    },\n    {\n      type: 'execute',\n      stmt: {\n        sql: \"UPDATE facts SET strength = MAX(1, strength - 1) WHERE last_referenced < datetime('now', '-14 days') AND strength > 1\"\n      }\n    }\n  ]\n};\n\nreturn [{ json: { requestBody } }];"
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000012",
+      "name": "Build DB Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        470,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000002",
+      "name": "Load Data + Cleanup Old",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        690,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const dbResult = $input.first().json;\nconst results = dbResult.results || [];\nconst parseRows = (result) => {\n  if (!result || !result.response || !result.response.result) return [];\n  const cols = result.response.result.columns || result.response.result.cols || [];\n  const rows = result.response.result.rows || [];\n  return rows.map(row => {\n    const obj = {};\n    cols.forEach((col, i) => {\n      const cell = row[i];\n      obj[col.name] = (cell && typeof cell === 'object' && 'value' in cell) ? cell.value : cell;\n    });\n    return obj;\n  });\n};\n\nconst factManagerPrompt = parseRows(results[0])[0]?.content || '';\nconst allFacts = parseRows(results[1]);\nconst activeSessions = parseRows(results[2]);\n\nreturn [{ json: { factManagerPrompt, allFacts, activeSessions } }];"
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000003",
+      "name": "Parse Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        910,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-facts",
+              "leftValue": "={{ $json.allFacts.length }}",
+              "rightValue": "2",
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000004",
+      "name": "Has Enough Facts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1130,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Parse Results').first().json;\nconst factsList = prevData.allFacts.map(f => '[' + f.id + '] ' + f.fact + ' (' + f.category + ', strength: ' + f.strength + ')').join('\\n');\n\nconst messages = [\n  { role: 'system', content: prevData.factManagerPrompt },\n  { role: 'user', content: 'EXISTING FACTS:\\n' + factsList + '\\n\\nAnalyze and return JSON with actions to take.' }\n];\n\nreturn [{ json: { messages } }];"
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000013",
+      "name": "Build LLM Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1350,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'laguna-s-2.1-free', messages: $json.messages, temperature: 0.2, max_tokens: 1500 }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-opencode-client",
+              "value": "cli"
+            },
+            {
+              "name": "x-opencode-session",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-project",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "x-opencode-request",
+              "value": "={{ Math.random().toString(36).substring(2, 15) }}"
+            },
+            {
+              "name": "User-Agent",
+              "value": "opencode/latest/1.3.15/cli"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000005",
+      "name": "LLM \u2014 Dedupe Facts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1570,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ngYc5oF80W9ovITM",
+          "name": "Clara \u2014 OpenCode Zen"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const llmResponse = $input.first().json;\nconst content = (llmResponse.choices && llmResponse.choices[0] && llmResponse.choices[0].message && llmResponse.choices[0].message.content) || '';\n\nlet actions;\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  actions = JSON.parse(jsonMatch ? jsonMatch[0] : content);\n} catch (e) {\n  actions = { actions: [], removed_ids: [] };\n}\n\nconst stmts = [];\nconst removedIds = actions.removed_ids || [];\n\n(actions.actions || []).forEach(a => {\n  if (a.action === 'add') {\n    stmts.push({\n      type: 'execute',\n      stmt: {\n        sql: 'INSERT INTO facts (fact, category, strength, confidence) VALUES (?, ?, ?, ?)',\n        args: [\n          { type: 'text', value: a.fact || '' },\n          { type: 'text', value: a.category || 'general' },\n          { type: 'integer', value: a.strength || 5 },\n          { type: 'float', value: a.confidence || 0.8 }\n        ]\n      }\n    });\n  } else if (a.action === 'update' && a.fact_id) {\n    stmts.push({\n      type: 'execute',\n      stmt: {\n        sql: 'UPDATE facts SET fact = ?, category = ?, strength = ?, confidence = ? WHERE id = ?',\n        args: [\n          { type: 'text', value: a.fact || '' },\n          { type: 'text', value: a.category || 'general' },\n          { type: 'integer', value: a.strength || 5 },\n          { type: 'float', value: a.confidence || 0.8 },\n          { type: 'integer', value: a.fact_id }\n        ]\n      }\n    });\n  } else if (a.action === 'remove' && a.fact_id) {\n    removedIds.push(a.fact_id);\n  }\n});\n\nremovedIds.forEach(id => {\n  stmts.push({\n    type: 'execute',\n    stmt: {\n      sql: 'DELETE FROM facts WHERE id = ?',\n      args: [{ type: 'integer', value: id }]\n    }\n  });\n});\n\nreturn [{ json: { requestBody: { requests: stmts } } }];"
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000006",
+      "name": "Parse Fact Actions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1790,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000008",
+      "name": "Execute Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2010,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Parse Results').first().json;\nconst activeSessions = prevData.activeSessions || [];\nconst now = new Date();\nconst idleThreshold = 24 * 60 * 60 * 1000;\n\nconst idleSessions = activeSessions.filter(s => {\n  const lastActive = new Date(s.last_active);\n  return (now - lastActive) > idleThreshold;\n});\n\nif (idleSessions.length === 0) {\n  return [{ json: { idle_sessions: [] } }];\n}\n\nconst requests = idleSessions.map(s => ({\n  type: 'execute',\n  stmt: {\n    sql: 'UPDATE sessions SET status = ? WHERE session_id = ?',\n    args: [\n      { type: 'text', value: 'archived' },\n      { type: 'text', value: s.session_id }\n    ]\n  }\n}));\n\nreturn [{ json: { requestBody: { requests }, idle_count: idleSessions.length } }];"
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000009",
+      "name": "Check Idle Sessions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1350,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-idle",
+              "leftValue": "={{ $json.idle_count }}",
+              "rightValue": "0",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000010",
+      "name": "Has Idle Sessions?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1570,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://gf-bot-kingslayer.aws-ap-south-1.turso.io/v2/pipeline",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "id": "d1e2f3a4-0005-4000-8000-000000000011",
+      "name": "Archive Idle Sessions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1790,
+        450
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DyLJGF2WfB8HLpCu",
+          "name": "Clara \u2014 Turso"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Build DB Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build DB Request": {
+      "main": [
+        [
+          {
+            "node": "Load Data + Cleanup Old",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Data + Cleanup Old": {
+      "main": [
+        [
+          {
+            "node": "Parse Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Results": {
+      "main": [
+        [
+          {
+            "node": "Has Enough Facts?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Idle Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Enough Facts?": {
+      "main": [
+        [
+          {
+            "node": "Build LLM Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Build LLM Request": {
+      "main": [
+        [
+          {
+            "node": "LLM \u2014 Dedupe Facts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM \u2014 Dedupe Facts": {
+      "main": [
+        [
+          {
+            "node": "Parse Fact Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Fact Actions": {
+      "main": [
+        [
+          {
+            "node": "Execute Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Idle Sessions": {
+      "main": [
+        [
+          {
+            "node": "Has Idle Sessions?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Idle Sessions?": {
+      "main": [
+        [
+          {
+            "node": "Archive Idle Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}
